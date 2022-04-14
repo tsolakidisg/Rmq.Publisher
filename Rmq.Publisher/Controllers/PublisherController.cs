@@ -27,17 +27,12 @@ namespace Rmq.Publisher.Controllers
         }
 
         [HttpPost]
-        public IActionResult Post([FromBody] OrderPublish order)
+        public IActionResult Post([FromBody] RequestModel order)
         {
-            ConcurrentDictionary<string, OrderPublish> waitingRequests = new ConcurrentDictionary<string, OrderPublish>();
+            // Create a Dictionary to cover the request format => Header: RequestId(string), Payload: Object(RequestModel) 
+            ConcurrentDictionary<string, RequestModel> pendingRequests = new ConcurrentDictionary<string, RequestModel>();
 
-            //ConnectionFactory factory = new ConnectionFactory();
-            //// "guest"/"guest" by default, limited to localhost connections
-            //factory.HostName = "localhost";
-            //factory.VirtualHost = "/";
-            //factory.Port = 5672;
-            //factory.UserName = "guest";
-            //factory.Password = "guest";
+            // Create a connection factory, using the RabbitMQ configuration settings from appsettings.json
             ConnectionFactory factory = new ConnectionFactory
             {
                 HostName = _configuration["RabbitMqConnection:HostName"].ToString(),
@@ -47,50 +42,42 @@ namespace Rmq.Publisher.Controllers
                 Password = _configuration["RabbitMqConnection:Password"].ToString()
             };
 
-            IConnection conn = factory.CreateConnection();
-            IModel channel = conn.CreateModel();
+            IConnection connection = factory.CreateConnection();
+            IModel channel = connection.CreateModel();
 
+            // Queue name for publish
             string publishQueue = "publisherQueue";
-            string consumeQueue = "consumerQueue";
 
-            OrderConsume responseData = new OrderConsume();
-
-            var consumer = new EventingBasicConsumer(channel);
-
-            consumer.Received += (sender, e) =>
-            {
-                string messageData = Encoding.UTF8.GetString((byte[])e.BasicProperties.Headers["RequestId"]);
-                OrderConsume response = JsonConvert.DeserializeObject<OrderConsume>(messageData);
-
-                responseData = response;
-            };
-
-            channel.BasicConsume(consumeQueue, true, consumer);
-
-            sendRequest(waitingRequests, channel, new OrderPublish(order.OrderID, order.OrderStatus), publishQueue);
+            SendRequest(pendingRequests, channel, new RequestModel(order.OrderID, order.OrderStatus), publishQueue);
 
             channel.Close();
-            conn.Close();
+            connection.Close();
 
             return StatusCode(StatusCodes.Status201Created);
         }
 
-        private static void sendRequest(ConcurrentDictionary<string, OrderPublish> waitingRequest, IModel channel, OrderPublish request, string queueName)
+        private static void SendRequest(ConcurrentDictionary<string, RequestModel> pendingRequest, IModel channel, RequestModel request, string queueName)
         {
+            // Generate a guid to use as header in the RequestId filed
             string requestId = Guid.NewGuid().ToString();
+            // Serialize the request as a JSON object
             string requestData = JsonConvert.SerializeObject(request);
 
-            waitingRequest[requestId] = request;
+            pendingRequest[requestId] = request;
 
             var basicProperties = channel.CreateBasicProperties();
-            basicProperties.Headers = new Dictionary<string, object>();
-            basicProperties.Headers.Add("RequestId", Encoding.UTF8.GetBytes(requestId));
+            // Create the Header field RequestId in order to use it in the request
+            basicProperties.Headers = new Dictionary<string, object>
+            {
+                { "RequestId", Encoding.UTF8.GetBytes(requestId) }
+            };
 
             channel.BasicPublish(
-                "",
-                queueName,
+                string.Empty, // Use the default exchange
+                queueName, 
                 basicProperties,
-                Encoding.UTF8.GetBytes(requestData));
+                Encoding.UTF8.GetBytes(requestData) // Encode the request message as Bytes
+                );
         }
 
     }
